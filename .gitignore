@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 dataset/*
-.png
-.out
-.err
+log/*
+save/*
+*.png
+*.out
+*.err
