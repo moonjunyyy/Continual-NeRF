@@ -25,7 +25,7 @@ echo "MASTER_ADDR="$MASTER_ADDR
 source /data/moonjunyyy/init.sh
 conda activate visionnerf
 
-python train.py \
+python train_continual.py \
     --expname NERF_CONTINUAL_3 \
     --logdir ./log \
     --ckptdir ./save \

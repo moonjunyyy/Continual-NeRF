@@ -240,13 +240,12 @@ class ContinualDVRDataset(Dataset):
         self.dataset_name = os.path.basename(args.data_path)
         assert os.path.exists(self.base_path)
 
-
         cats = ['02828884', '02933112', '03636649', '03691459', '04090263']
         cats = [x for x in glob.glob(os.path.join(args.data_path, "*")) if os.path.isdir(x) and x.split("/")[-1] in cats]
 
         list_prefix = "softras_" # Train on all categories and eval on them
 
-        all_objs = []
+        self.all_objs = []
         np.random.seed(158)
         for cat in cats:
             objs = [x for x in glob.glob(os.path.join(cat, "*")) if os.path.isdir(x)]
@@ -260,7 +259,7 @@ class ContinualDVRDataset(Dataset):
                 index = index[1275:]
 
             objs = [objs[x] for x in index]
-            all_objs.extend(objs)
+            self.all_objs.extend(objs)
 
         print("Loading NMR dataset", self.base_path, "name:", self.dataset_name, "mode:", mode)
 
@@ -269,7 +268,7 @@ class ContinualDVRDataset(Dataset):
         self.intrinsics = []
         self.poses = []
         self.rgb_paths = []
-        for _, path in tqdm.tqdm(self.all_objs):
+        for path in tqdm.tqdm(self.all_objs):
             curr_paths = sorted(glob.glob(os.path.join(path, "image", "*")))
             self.rgb_paths.append(curr_paths)
 

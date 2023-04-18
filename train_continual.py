@@ -39,23 +39,36 @@ from data.create_training_dataset import create_training_dataset
 import opt
 from utils import img2mse, mse2psnr, img_HWC2CHW, colorize, img2psnr, get_views
 from typing import Optional, Sized
+from data.dvr import ContinualDVRDataset
 
 class Continual_Nerf_Sampler(torch.utils.data.Sampler):
-    def __init__(self, data_source: Optional[Sized], class_idxs, iters) -> None:
+    def __init__(self, data_source: Optional[Sized], shuffle) -> None:
         super().__init__(data_source)
         self.data_source = data_source
-        self.class_idxs = class_idxs
-        self.iters = iters
+        # Continual NeRF Dataset has sequences of 5 classes
+        self.num_class = len(self.data_source) // 5
+        self.shuffle = shuffle
+        if self.shuffle:
+            self.indices = np.random.permutation(self.num_class)
+        else:
+            self.indices = [i for i in range(self.num_class)]
+
+    def set_task(self, task_id):
+        if self.shuffle:
+            self.indices = np.random.permutation(self.num_class) + self.num_class * task_id
+        else:
+            self.indices = [i for i in range(self.num_class * task_id, self.num_class * (task_id + 1))]
+
+    def set_epoch(self, epoch):
+        if self.shuffle:
+            np.random.seed(epoch)
+            self.indices = np.random.permutation(self.num_class)
 
     def __iter__(self):
-        ret = []
-        for n in self.class_idxs:
-            for i in range(self.iters):
-                ret.append(n)
-        return iter(ret)
-
+        return iter(self.indices)
+    
     def __len__(self):
-        return len(self.class_idxs) * self.iters  
+        return len(self.indices)
 
 # Fix numpy's duplicated RNG issue and make the experiments reproducible
 # https://pytorch.org/docs/stable/notes/randomness.html#dataloader
@@ -105,8 +118,9 @@ def train(args):
             shutil.copy(args.config, f)
 
     # Create training dataset
-    train_dataset, train_sampler = create_training_dataset(args)
-    train_sampler = Continual_Nerf_Sampler(train_dataset, args.train_indices, args.n_iters)
+    # train_dataset, train_sampler = create_training_dataset(args)
+    train_dataset = ContinualDVRDataset(args, 'train')
+    train_sampler = Continual_Nerf_Sampler(train_dataset, shuffle=True)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                                worker_init_fn=workder_init_fn,
                                                num_workers=args.workers,
@@ -114,21 +128,9 @@ def train(args):
                                                sampler=train_sampler,
                                                shuffle=True if train_sampler is None else False)
 
-    # Create training visualization dataset
-    train_indices = args.train_indices
-    if args.debug:
-        train_indices = [0]
-    train_vis_dataset = eval_dataset_dict[args.data_type](args, 'train')
-    train_vis_subset = torch.utils.data.Subset(train_vis_dataset, train_indices)
-    train_vis_loader = DataLoader(train_vis_subset, batch_size=1, shuffle=False)
-
-    # Create validation dataset
-    val_dataset = eval_dataset_dict[args.data_type](args, 'val')
-    val_indices = args.val_indices
-    if args.debug:
-        val_indices = [0]
-    val_subset = torch.utils.data.Subset(val_dataset, val_indices)
-    val_loader = DataLoader(val_subset, batch_size=1, shuffle=False)
+    val_dataset = ContinualDVRDataset(args, 'val')
+    val_sampler = Continual_Nerf_Sampler(val_dataset, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=1, sampler=val_sampler)
 
     # Create model
     model = VisionNerfModel(args, load_opt=not args.no_load_opt, load_scheduler=not args.no_load_scheduler)
@@ -146,148 +148,148 @@ def train(args):
     global_step = model.start_step + 1
     epoch = 0
     # while global_step < model.start_step + args.n_iters + 1:
-    np.random.seed()
-    for train_data in train_loader:
-        time0 = time.time()
-
-        if args.distributed:
+    
+    num_task = 5
+    for task_id in range(num_task):
+        train_sampler.set_task(task_id)
+        print('Task ID: {}'.format(task_id))
+        np.random.seed()
+        for iter in range(args.n_iters):
             train_sampler.set_epoch(epoch)
+            for load_id, train_data in enumerate(train_loader):
+                # print('Iter: {}, Load ID: {}'.format(iter, load_id))
+                time0 = time.time()
+                ray_sampler = RaySamplerMultipleImages(train_data, device, global_step, bbox_steps=args.bbox_steps)
+                ray_batch = ray_sampler.random_sample(args.N_rand,
+                                                        sample_mode=args.sample_mode,
+                                                        center_ratio=args.center_ratio,
+                                                        )
+                featmaps = model.encode(ray_batch['src_rgbs']) # (batch, #views, #channels, height', width')
 
-        # Start of core optimization loop
+                ret = render_rays(ray_batch=ray_batch,
+                                    model=model,
+                                    featmaps=featmaps,
+                                    projector=projector,
+                                    N_samples=args.N_samples,
+                                    inv_uniform=args.inv_uniform,
+                                    N_importance=args.N_importance,
+                                    det=args.det,
+                                    white_bkgd=args.white_bkgd)
+                
+                # compute loss
+                model.optimizer.zero_grad()
+                loss, scalars_to_log = criterion(ret['outputs_coarse'], ray_batch, scalars_to_log)
 
-        # Load training rays
-        ray_sampler = RaySamplerMultipleImages(train_data, device, global_step, bbox_steps=args.bbox_steps)
-
-        ray_batch = ray_sampler.random_sample(args.N_rand,
-                                                sample_mode=args.sample_mode,
-                                                center_ratio=args.center_ratio,
-                                                )
-        featmaps = model.encode(ray_batch['src_rgbs']) # (batch, #views, #channels, height', width')
-
-        ret = render_rays(ray_batch=ray_batch,
-                            model=model,
-                            featmaps=featmaps,
-                            projector=projector,
-                            N_samples=args.N_samples,
-                            inv_uniform=args.inv_uniform,
-                            N_importance=args.N_importance,
-                            det=args.det,
-                            white_bkgd=args.white_bkgd)
-        
-        # compute loss
-        model.optimizer.zero_grad()
-        loss, scalars_to_log = criterion(ret['outputs_coarse'], ray_batch, scalars_to_log)
-
-        if ret['outputs_fine'] is not None:
-            fine_loss, scalars_to_log = criterion(ret['outputs_fine'], ray_batch, scalars_to_log)
-            loss += fine_loss
-
-        loss.backward()
-        scalars_to_log['loss'] = loss.item()
-        model.optimizer.step()
-        if args.use_warmup and global_step < args.warmup_steps:
-            model.warmup_scheduler.step()
-            model.scheduler.step()
-        else:
-            model.scheduler.step()
-
-        scalars_to_log['lr'] = model.scheduler.get_last_lr()[0]
-        # end of core optimization loop
-        dt = time.time() - time0
-
-        # Rest is logging
-        if args.local_rank == 0:
-            if global_step % args.i_print == 0 or global_step < 10:
-                # write mse and psnr stats
-                mse_error = img2mse(ret['outputs_coarse']['rgb'], ray_batch['rgb']).item() # pylint: disable=unsubscriptable-object
-                scalars_to_log['train/coarse-loss'] = mse_error
-                scalars_to_log['train/coarse-psnr-training-batch'] = mse2psnr(mse_error)
                 if ret['outputs_fine'] is not None:
-                    mse_error = img2mse(ret['outputs_fine']['rgb'], ray_batch['rgb']).item() # pylint: disable=unsubscriptable-object
-                    scalars_to_log['train/fine-loss'] = mse_error
-                    scalars_to_log['train/fine-psnr-training-batch'] = mse2psnr(mse_error)
+                    fine_loss, scalars_to_log = criterion(ret['outputs_fine'], ray_batch, scalars_to_log)
+                    loss += fine_loss
 
-                logstr = '{} Epoch: {}  step: {} '.format(args.expname, epoch, global_step)
-                for k in scalars_to_log.keys():
-                    logstr += ' {}: {:.6f}'.format(k, scalars_to_log[k])
-                    writer.add_scalar(k, scalars_to_log[k], global_step)
-                print(logstr)
-                print('each iter time {:.05f} seconds'.format(dt))
+                loss.backward()
+                scalars_to_log['loss'] = loss.item()
+                model.optimizer.step()
+                if args.use_warmup and global_step < args.warmup_steps:
+                    model.warmup_scheduler.step()
+                    model.scheduler.step()
+                else:
+                    model.scheduler.step()
 
-            if global_step % args.i_weights == 0:
-                print('Saving checkpoints at {} to {}...'.format(global_step, out_folder))
-                fpath = os.path.join(out_folder, 'model_{:06d}.pth'.format(global_step))
-                model.save_model(fpath)
+                scalars_to_log['lr'] = model.scheduler.get_last_lr()[0]
+                # end of core optimization loop
+                dt = time.time() - time0
 
-            if global_step % args.i_img == 0:
-                model.switch_to_eval()
-                
-                print('Logging a random validation view...')
-                output_dicts = []
-                src_imgs = []
-                gt_imgs = []
+                # Rest is logging
+                if args.local_rank == 0:
+                    if global_step % args.i_print == 0 or global_step < 10:
+                        # write mse and psnr stats
+                        mse_error = img2mse(ret['outputs_coarse']['rgb'], ray_batch['rgb']).item() # pylint: disable=unsubscriptable-object
+                        scalars_to_log['train/coarse-loss'] = mse_error
+                        scalars_to_log['train/coarse-psnr-training-batch'] = mse2psnr(mse_error)
+                        if ret['outputs_fine'] is not None:
+                            mse_error = img2mse(ret['outputs_fine']['rgb'], ray_batch['rgb']).item() # pylint: disable=unsubscriptable-object
+                            scalars_to_log['train/fine-loss'] = mse_error
+                            scalars_to_log['train/fine-psnr-training-batch'] = mse2psnr(mse_error)
 
-                for val_data in val_loader:
-                    pairs = get_views(val_data, args.val_src_views, args.val_tgt_views)
-                    for idx, pair in enumerate(pairs):
-                        tmp_ray_sampler = RaySamplerSingleImage(pair, device, render_stride=args.render_stride)
-                        output_dict = render_image(args, model, tmp_ray_sampler, projector, args.render_stride)
-                        src_img, gt_img = get_imgs_from_sampler(tmp_ray_sampler, args.render_stride)
+                        logstr = '{} Epoch: {}  step: {} '.format(args.expname, epoch, global_step)
+                        for k in scalars_to_log.keys():
+                            logstr += ' {}: {:.6f}'.format(k, scalars_to_log[k])
+                            writer.add_scalar(k, scalars_to_log[k], global_step)
+                        print(logstr)
+                        print('each iter time {:.05f} seconds'.format(dt))
 
-                        output_dicts.append(output_dict)
-                        src_imgs.append(src_img)
-                        gt_imgs.append(gt_img)
-                
-                for idx, (od, si, gt) in enumerate(zip(output_dicts, src_imgs, gt_imgs)):
-                    plt.subplot(1, 3, 1)
-                    plt.imshow(si)
-                    plt.subplot(1, 3, 2)
-                    plt.imshow(gt)
-                    plt.subplot(1, 3, 3)
-                    plt.imshow(od['outputs_coarse']['rgb'])
-                    plt.savefig(f'{tb_dir}/val_{args.expname}_{global_step}_{idx}.png')
+                    if global_step % args.i_weights == 0:
+                        print('Saving checkpoints at {} to {}...'.format(global_step, out_folder))
+                        fpath = os.path.join(out_folder, 'model_{:06d}.pth'.format(global_step))
+                        model.save_model(fpath)
 
-                log_view_to_tb(writer, global_step, src_imgs,
-                            gt_imgs, output_dicts, len(args.val_tgt_views), prefix=f'val/')
+                    if global_step % args.i_img == 0:
+                        model.switch_to_eval()
+                        
+                        print('Logging a random validation view...')
+                        output_dicts = []
+                        src_imgs = []
+                        gt_imgs = []
 
-                torch.cuda.empty_cache()
+                        for val_data in val_loader:
+                            pairs = get_views(val_data, args.val_src_views, args.val_tgt_views)
+                            for idx, pair in enumerate(pairs):
+                                tmp_ray_sampler = RaySamplerSingleImage(pair, device, render_stride=args.render_stride)
+                                output_dict = render_image(args, model, tmp_ray_sampler, projector, args.render_stride)
+                                src_img, gt_img = get_imgs_from_sampler(tmp_ray_sampler, args.render_stride)
 
-                print('Logging current training view...')
-                output_dicts = []
-                src_imgs = []
-                gt_imgs = []
+                                output_dicts.append(output_dict)
+                                src_imgs.append(src_img)
+                                gt_imgs.append(gt_img)
+                        
+                        for idx, (od, si, gt) in enumerate(zip(output_dicts, src_imgs, gt_imgs)):
+                            plt.subplot(1, 3, 1)
+                            plt.imshow(si)
+                            plt.subplot(1, 3, 2)
+                            plt.imshow(gt)
+                            plt.subplot(1, 3, 3)
+                            plt.imshow(od['outputs_coarse']['rgb'])
+                            plt.savefig(f'{tb_dir}/val_{args.expname}_{global_step}_{idx}.png')
 
-                for vis_data in train_vis_loader:
-                    pairs = get_views(vis_data, args.train_src_views, args.train_tgt_views)
-                    for idx, pair in enumerate(pairs):
-                        tmp_ray_sampler = RaySamplerSingleImage(pair, device, render_stride=args.render_stride)
-                        output_dict = render_image(args, model, tmp_ray_sampler, projector, args.render_stride)
-                        src_img, gt_img = get_imgs_from_sampler(tmp_ray_sampler, args.render_stride)
+                        log_view_to_tb(writer, global_step, src_imgs,
+                                    gt_imgs, output_dicts, len(args.val_tgt_views), prefix=f'val/')
 
-                        output_dicts.append(output_dict)
-                        src_imgs.append(src_img)
-                        gt_imgs.append(gt_img)
+                        torch.cuda.empty_cache()
 
-                for idx, (od, si, gt) in enumerate(zip(output_dicts, src_imgs, gt_imgs)):
-                    plt.subplot(1, 3, 1)
-                    plt.imshow(si)
-                    plt.subplot(1, 3, 2)
-                    plt.imshow(gt)
-                    plt.subplot(1, 3, 3)
-                    plt.imshow(od['outputs_coarse']['rgb'])
-                    plt.savefig(f'{tb_dir}/train_{args.expname}_{global_step}_{idx}.png')
+                        print('Logging current training view...')
+                        output_dicts = []
+                        src_imgs = []
+                        gt_imgs = []
 
-                log_view_to_tb(writer, global_step, src_imgs,
-                            gt_imgs, output_dicts, len(args.train_tgt_views), prefix=f'train/')
+                        # for vis_data in train_vis_loader:
+                        #     pairs = get_views(vis_data, args.train_src_views, args.train_tgt_views)
+                        #     for idx, pair in enumerate(pairs):
+                        #         tmp_ray_sampler = RaySamplerSingleImage(pair, device, render_stride=args.render_stride)
+                        #         output_dict = render_image(args, model, tmp_ray_sampler, projector, args.render_stride)
+                        #         src_img, gt_img = get_imgs_from_sampler(tmp_ray_sampler, args.render_stride)
 
-                torch.cuda.empty_cache()
+                        #         output_dicts.append(output_dict)
+                        #         src_imgs.append(src_img)
+                        #         gt_imgs.append(gt_img)
 
-                model.switch_to_train()
+                        # for idx, (od, si, gt) in enumerate(zip(output_dicts, src_imgs, gt_imgs)):
+                        #     plt.subplot(1, 3, 1)
+                        #     plt.imshow(si)
+                        #     plt.subplot(1, 3, 2)
+                        #     plt.imshow(gt)
+                        #     plt.subplot(1, 3, 3)
+                        #     plt.imshow(od['outputs_coarse']['rgb'])
+                        #     plt.savefig(f'{tb_dir}/train_{args.expname}_{global_step}_{idx}.png')
 
-        global_step += 1
-        if global_step > model.start_step + args.n_iters + 1:
-            break
-    epoch += 1
+                        # log_view_to_tb(writer, global_step, src_imgs,
+                        #             gt_imgs, output_dicts, len(args.train_tgt_views), prefix=f'train/')
+
+                        # torch.cuda.empty_cache()
+
+                        # model.switch_to_train()
+
+            global_step += 1
+            if global_step > model.start_step + args.n_iters + 1:
+                break
+        epoch += 1
 
 def render_image(args, model, ray_sampler, projector, render_stride=1):
     with torch.no_grad():
