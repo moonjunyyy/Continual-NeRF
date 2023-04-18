@@ -240,6 +240,7 @@ def train(args):
                     gt_imgs = []
 
                     for vis_data in train_vis_loader:
+                        print(vis_data)
                         pairs = get_views(vis_data, args.train_src_views, args.train_tgt_views)
                         for idx, pair in enumerate(pairs):
                             tmp_ray_sampler = RaySamplerSingleImage(pair, device, render_stride=args.render_stride)

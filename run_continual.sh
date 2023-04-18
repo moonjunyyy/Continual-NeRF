@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH -J NERF_CONTINUAL_2
+#SBATCH -J NERF_CON_1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=4
 #SBATCH --mem-per-gpu=16G
@@ -26,7 +26,7 @@ source /data/moonjunyyy/init.sh
 conda activate visionnerf
 
 python train_continual.py \
-    --expname NERF_CONTINUAL_3 \
+    --expname NERF_CON_1 \
     --logdir ./log \
     --ckptdir ./save \
     --data_path /local_datasets/NMR_Dataset \
@@ -45,9 +45,9 @@ python train_continual.py \
     --n_iters 500000 \
     --data_type dvr \
     --train_src_views 2 2 2 \
-    --train_indices 1 2 3 \
-    --train_tgt_views 6 9 12 \
+    --train_indices 3 1053 2103 3153 4203 \
+    --train_tgt_views 2 6 10 \
     --img_hw 64 64 \
-    --val_indices 1 2 3 \
+    --val_indices 2 228 456 677 903 \
     --val_src_views 2 2 2 \
-    --val_tgt_views 0 10 16
+    --val_tgt_views 2 6 10

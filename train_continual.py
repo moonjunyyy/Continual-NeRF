@@ -39,7 +39,7 @@ from data.create_training_dataset import create_training_dataset
 import opt
 from utils import img2mse, mse2psnr, img_HWC2CHW, colorize, img2psnr, get_views
 from typing import Optional, Sized
-from data.dvr import ContinualDVRDataset
+from data.dvr import ContinualDVRDataset, ContinualDVREvalDataset
 
 class Continual_Nerf_Sampler(torch.utils.data.Sampler):
     def __init__(self, data_source: Optional[Sized], shuffle) -> None:
@@ -127,10 +127,15 @@ def train(args):
                                                pin_memory=True,
                                                sampler=train_sampler,
                                                shuffle=True if train_sampler is None else False)
+    
+    train_vis_data = ContinualDVREvalDataset(args, 'train')
+    train_vis_subset = torch.utils.data.Subset(train_vis_data, args.train_indices)
+    train_vis_loader = DataLoader(train_vis_subset, batch_size=1,shuffle=False)
 
-    val_dataset = ContinualDVRDataset(args, 'val')
-    val_sampler = Continual_Nerf_Sampler(val_dataset, shuffle=False)
-    val_loader = DataLoader(val_dataset, batch_size=1, sampler=val_sampler)
+    val_dataset = ContinualDVREvalDataset(args, 'val')
+    print(args.val_indices)
+    val_subset = torch.utils.data.Subset(val_dataset, args.val_indices)
+    val_loader = DataLoader(val_subset, batch_size=1,shuffle=False)
 
     # Create model
     model = VisionNerfModel(args, load_opt=not args.no_load_opt, load_scheduler=not args.no_load_scheduler)
@@ -239,7 +244,7 @@ def train(args):
                                 output_dicts.append(output_dict)
                                 src_imgs.append(src_img)
                                 gt_imgs.append(gt_img)
-                        
+
                         for idx, (od, si, gt) in enumerate(zip(output_dicts, src_imgs, gt_imgs)):
                             plt.subplot(1, 3, 1)
                             plt.imshow(si)
@@ -249,8 +254,8 @@ def train(args):
                             plt.imshow(od['outputs_coarse']['rgb'])
                             plt.savefig(f'{tb_dir}/val_{args.expname}_{global_step}_{idx}.png')
 
-                        log_view_to_tb(writer, global_step, src_imgs,
-                                    gt_imgs, output_dicts, len(args.val_tgt_views), prefix=f'val/')
+                        # log_view_to_tb(writer, global_step, src_imgs,
+                        #             gt_imgs, output_dicts, len(args.val_tgt_views), prefix=f'val/')
 
                         torch.cuda.empty_cache()
 
@@ -259,32 +264,32 @@ def train(args):
                         src_imgs = []
                         gt_imgs = []
 
-                        # for vis_data in train_vis_loader:
-                        #     pairs = get_views(vis_data, args.train_src_views, args.train_tgt_views)
-                        #     for idx, pair in enumerate(pairs):
-                        #         tmp_ray_sampler = RaySamplerSingleImage(pair, device, render_stride=args.render_stride)
-                        #         output_dict = render_image(args, model, tmp_ray_sampler, projector, args.render_stride)
-                        #         src_img, gt_img = get_imgs_from_sampler(tmp_ray_sampler, args.render_stride)
+                        for vis_data in train_vis_loader:
+                            pairs = get_views(vis_data, args.train_src_views, args.train_tgt_views)
+                            for idx, pair in enumerate(pairs):
+                                tmp_ray_sampler = RaySamplerSingleImage(pair, device, render_stride=args.render_stride)
+                                output_dict = render_image(args, model, tmp_ray_sampler, projector, args.render_stride)
+                                src_img, gt_img = get_imgs_from_sampler(tmp_ray_sampler, args.render_stride)
 
-                        #         output_dicts.append(output_dict)
-                        #         src_imgs.append(src_img)
-                        #         gt_imgs.append(gt_img)
+                                output_dicts.append(output_dict)
+                                src_imgs.append(src_img)
+                                gt_imgs.append(gt_img)
 
-                        # for idx, (od, si, gt) in enumerate(zip(output_dicts, src_imgs, gt_imgs)):
-                        #     plt.subplot(1, 3, 1)
-                        #     plt.imshow(si)
-                        #     plt.subplot(1, 3, 2)
-                        #     plt.imshow(gt)
-                        #     plt.subplot(1, 3, 3)
-                        #     plt.imshow(od['outputs_coarse']['rgb'])
-                        #     plt.savefig(f'{tb_dir}/train_{args.expname}_{global_step}_{idx}.png')
+                        for idx, (od, si, gt) in enumerate(zip(output_dicts, src_imgs, gt_imgs)):
+                            plt.subplot(1, 3, 1)
+                            plt.imshow(si)
+                            plt.subplot(1, 3, 2)
+                            plt.imshow(gt)
+                            plt.subplot(1, 3, 3)
+                            plt.imshow(od['outputs_coarse']['rgb'])
+                            plt.savefig(f'{tb_dir}/train_{args.expname}_{global_step}_{idx}.png')
 
-                        # log_view_to_tb(writer, global_step, src_imgs,
-                        #             gt_imgs, output_dicts, len(args.train_tgt_views), prefix=f'train/')
+                        log_view_to_tb(writer, global_step, src_imgs,
+                                    gt_imgs, output_dicts, len(args.train_tgt_views), prefix=f'train/')
 
-                        # torch.cuda.empty_cache()
+                        torch.cuda.empty_cache()
 
-                        # model.switch_to_train()
+                        model.switch_to_train()
                 global_step += 1
                 if global_step > model.start_step + args.n_iters + 1:
                     break
