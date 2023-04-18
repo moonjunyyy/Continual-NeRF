@@ -165,7 +165,7 @@ def train(args):
                                                         center_ratio=args.center_ratio,
                                                         )
                 featmaps = model.encode(ray_batch['src_rgbs']) # (batch, #views, #channels, height', width')
-
+                
                 ret = render_rays(ray_batch=ray_batch,
                                     model=model,
                                     featmaps=featmaps,
@@ -175,7 +175,7 @@ def train(args):
                                     N_importance=args.N_importance,
                                     det=args.det,
                                     white_bkgd=args.white_bkgd)
-                
+
                 # compute loss
                 model.optimizer.zero_grad()
                 loss, scalars_to_log = criterion(ret['outputs_coarse'], ray_batch, scalars_to_log)
@@ -285,10 +285,9 @@ def train(args):
                         # torch.cuda.empty_cache()
 
                         # model.switch_to_train()
-
-            global_step += 1
-            if global_step > model.start_step + args.n_iters + 1:
-                break
+                global_step += 1
+                if global_step > model.start_step + args.n_iters + 1:
+                    break
         epoch += 1
 
 def render_image(args, model, ray_sampler, projector, render_stride=1):
