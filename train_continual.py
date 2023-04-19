@@ -293,6 +293,12 @@ def train(args):
                 global_step += 1
                 if global_step > model.start_step + args.n_iters + 1:
                     break
+            if global_step > model.start_step + args.n_iters + 1:
+                global_step = 0
+                print('Saving checkpoints at {} to {}...'.format(global_step, out_folder))
+                fpath = os.path.join(out_folder, 'continual', 'model_Task{:d}.pth'.format(task_id))
+                model.save_model(fpath)
+                break
         epoch += 1
 
 def render_image(args, model, ray_sampler, projector, render_stride=1):
